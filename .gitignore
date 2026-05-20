@@ -1,0 +1,10 @@
+node_modules/
+*.apk
+*.aab
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+Thumbs.db

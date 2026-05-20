@@ -1,0 +1,3 @@
+-keep class org.java_websocket.** { *; }
+-keep class rikka.shizuku.** { *; }
+-keep class * extends rikka.shizuku.ShizukuProvider
