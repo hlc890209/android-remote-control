@@ -4,52 +4,46 @@ import android.os.Bundle
 import android.text.InputType
 import android.view.View
 import android.widget.*
-import android.widget.LinearLayout
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.java_websocket.client.WebSocketClient
-import org.java_websocket.handshake.ServerHandshake
+import org.eclipse.paho.android.service.MqttAndroidClient
+import org.eclipse.paho.client.mqttv3.*
 import org.json.JSONObject
-import java.net.URI
+import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var tvShizuku: TextView
-    private lateinit var tvConn: TextView
+    private lateinit var tvMqtt: TextView
     private lateinit var tvRoom: TextView
+    private lateinit var tvPeer: TextView
     private lateinit var tvLog: TextView
     private lateinit var btnConnect: Button
     private lateinit var btnDisconnect: Button
 
     private val shell = ShizukuShell()
-    private var wsClient: WebSocketClient? = null
-    private var currentRoomId: String = ""
+    private var mqttClient: MqttAndroidClient? = null
+    private var currentRoomId = ""
+    private var isConnected = false
 
     private var config = Config(
-        relayHost = "your-server.com",
-        relayPort = 8080,
-        authToken = "zyyh_remote_test_2024",
-        roomId = "room_001"
+        broker = "broker.emqx.io",
+        port = 1883,
+        roomId = "test_001"
     )
 
-    data class Config(
-        val relayHost: String,
-        val relayPort: Int,
-        val authToken: String,
-        val roomId: String
-    )
+    data class Config(val broker: String, val port: Int, val roomId: String)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        tvShizuku = findViewById(R.id.tvShizukuStatus)
-        tvConn = findViewById(R.id.tvConnectionStatus)
-        tvRoom = findViewById(R.id.tvRoomInfo)
+        tvMqtt = findViewById(R.id.tvMqtt)
+        tvRoom = findViewById(R.id.tvRoom)
+        tvPeer = findViewById(R.id.tvPeer)
         tvLog = findViewById(R.id.tvLog)
         btnConnect = findViewById(R.id.btnConnect)
         btnDisconnect = findViewById(R.id.btnDisconnect)
@@ -63,14 +57,12 @@ class MainActivity : AppCompatActivity() {
     private fun checkShizuku() {
         lifecycleScope.launch {
             if (shell.isRunning()) {
-                tvShizuku.text = "Shizuku: 运行中"
-                tvShizuku.setTextColor(0xFF4CAF50.toInt())
+                appendLog("Shizuku: 运行中")
                 if (!shell.isPermissionGranted()) {
                     shell.requestPermission()
                 }
             } else {
-                tvShizuku.text = "Shizuku: 未运行"
-                tvShizuku.setTextColor(0xFFF44336.toInt())
+                appendLog("Shizuku: 未运行 - 请先激活Shizuku")
             }
         }
     }
@@ -79,133 +71,151 @@ class MainActivity : AppCompatActivity() {
         val inputLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 32, 48, 32)
-            var idCounter = View.generateViewId()
 
-            fun addLabel(text: String) = TextView(context).apply {
+            fun label(text: String) = TextView(context).apply {
                 this.text = text
                 textSize = 14f
                 setTextColor(0xFF666666.toInt())
                 setPadding(0, 12, 0, 4)
             }
 
-            fun addEdit(initial: String, hint: String, inputType: Int = InputType.TYPE_CLASS_TEXT) =
+            fun edit(initial: String, hint: String, type: Int = InputType.TYPE_CLASS_TEXT) =
                 EditText(context).apply {
-                    setId(idCounter++)
-                    setText(initial)
-                    this.hint = hint
-                    this.inputType = inputType
+                    setText(initial); this.hint = hint; inputType = type
                     setPadding(8, 8, 8, 8)
                     setBackgroundResource(android.R.drawable.editbox_background)
                 }
 
-            addView(addLabel("中继服务器地址:"))
-            val etHost = addEdit(config.relayHost, "例如: 123.123.123.123")
-            addView(etHost)
-
-            addView(addLabel("端口:"))
-            val etPort = addEdit(config.relayPort.toString(), "8080", InputType.TYPE_CLASS_NUMBER)
+            addView(label("MQTT Broker 地址（默认免费公共Broker）:"))
+            val etBroker = edit(config.broker, "broker.emqx.io")
+            addView(etBroker)
+            addView(label("端口:"))
+            val etPort = edit(config.port.toString(), "1883", InputType.TYPE_CLASS_NUMBER)
             addView(etPort)
-
-            addView(addLabel("房间ID:"))
-            val etRoom = addEdit(config.roomId, "与控制端相同的房间ID")
+            addView(label("房间ID（两端一致）:"))
+            val etRoom = edit(config.roomId, "test_001")
             addView(etRoom)
-
-            addView(addLabel("Token:"))
-            val etToken = addEdit(config.authToken, "认证令牌")
-            addView(etToken)
         }
 
         AlertDialog.Builder(this)
-            .setTitle("连接配置")
+            .setTitle("MQTT 连接配置")
             .setView(inputLayout)
             .setPositiveButton("连接") { _, _ ->
-                val host = inputLayout.getChildAt(1).let { (it as EditText).text.toString() }
+                val broker = inputLayout.getChildAt(1).let { (it as EditText).text.toString() }
                 val port = inputLayout.getChildAt(3).let { (it as EditText).text.toString() }
                 val room = inputLayout.getChildAt(5).let { (it as EditText).text.toString() }
-                val token = inputLayout.getChildAt(7).let { (it as EditText).text.toString() }
-                config = Config(host, port.toIntOrNull() ?: 8080, token, room)
-                connectToRelay()
+                config = Config(broker, port.toIntOrNull() ?: 1883, room)
+                connect()
             }
             .setNegativeButton("取消", null)
             .show()
     }
 
-    private fun connectToRelay() {
-        lifecycleScope.launch {
-            try {
-                val uri = URI("ws://${config.relayHost}:${config.relayPort}")
-                currentRoomId = config.roomId
+    private fun connect() {
+        currentRoomId = config.roomId
+        val serverUri = "tcp://${config.broker}:${config.port}"
+        val clientId = "zyyh_controlled_${config.roomId}_${UUID.randomUUID().toString().take(6)}"
 
-                wsClient = object : WebSocketClient(uri) {
-                    override fun onOpen(handshake: ServerHandshake) {
-                        appendLog("已连接到中继服务器")
-                        runOnUiThread {
-                            tvConn.text = "中继: 已连接"
-                            tvConn.setTextColor(0xFF4CAF50.toInt())
-                        }
-                        send(JSONObject().apply {
-                            put("type", "auth")
-                            put("token", config.authToken)
-                        }.toString())
-                    }
+        appendLog("正在连接 $serverUri ...")
+        tvMqtt.text = "MQTT: 连接中..."
 
-                    override fun onMessage(message: String) {
-                        handleRelayMessage(message)
-                    }
+        try {
+            mqttClient = MqttAndroidClient(this, serverUri, clientId)
+            val options = MqttConnectOptions().apply {
+                isAutomaticReconnect = true
+                isCleanSession = true
+                connectionTimeout = 10
+                keepAliveInterval = 30
 
-                    override fun onClose(code: Int, reason: String, remote: Boolean) {
-                        appendLog("连接关闭: $reason")
-                        runOnUiThread {
-                            tvConn.text = "中继: 已断开"
-                            tvConn.setTextColor(0xFFF44336.toInt())
-                            btnConnect.isEnabled = true
-                            btnDisconnect.isEnabled = false
-                        }
-                    }
+                // LWT: 通知控制端本机离线
+                will = MqttMessage("""{"type":"status","status":"offline"}""".toByteArray())
+                setWillDestination("zyyh/${config.roomId}/status")
+            }
 
-                    override fun onError(ex: Exception) {
-                        appendLog("连接错误: ${ex.message}")
+            mqttClient?.setCallback(object : MqttCallbackExtended {
+                override fun connectComplete(reconnect: Boolean, serverURI: String?) {
+                    isConnected = true
+                    runOnUiThread {
+                        tvMqtt.text = "MQTT: 已连接"
+                        tvRoom.text = "房间: ${config.roomId}"
+                        btnConnect.isEnabled = false
+                        btnDisconnect.isEnabled = true
                     }
+                    appendLog(if (reconnect) "已重连" else "已连接")
+
+                    // 订阅控制命令
+                    val cmdTopic = "zyyh/${config.roomId}/command"
+                    subscribe(cmdTopic)
+
+                    // 发布在线状态
+                    publish("zyyh/${config.roomId}/status",
+                        """{"type":"status","status":"online"}""")
                 }
 
-                wsClient?.connect()
-                appendLog("正在连接 ${config.relayHost}:${config.relayPort}...")
-                btnConnect.isEnabled = false
-                btnDisconnect.isEnabled = true
-                tvRoom.text = "房间ID: ${config.roomId}"
-            } catch (e: Exception) {
-                appendLog("连接失败: ${e.message}")
-                Toast.makeText(this@MainActivity, "连接失败", Toast.LENGTH_SHORT).show()
-            }
+                override fun connectionLost(cause: Throwable?) {
+                    isConnected = false
+                    appendLog("连接断开: ${cause?.message}")
+                    runOnUiThread { tvMqtt.text = "MQTT: 已断开" }
+                }
+
+                override fun messageArrived(topic: String?, message: MqttMessage?) {
+                    val payload = String(message?.payload ?: return)
+                    handleMessage(payload)
+                }
+
+                override fun deliveryComplete(token: IMqttDeliveryToken?) {}
+            })
+
+            mqttClient?.connect(options, null, object : IMqttActionListener {
+                override fun onSuccess(asyncActionToken: IMqttDeliveryToken?) {}
+                override fun onFailure(asyncActionToken: IMqttDeliveryToken?, exception: Throwable?) {
+                    appendLog("连接失败: ${exception?.message}")
+                    runOnUiThread { tvMqtt.text = "MQTT: 连接失败" }
+                }
+            })
+        } catch (e: Exception) {
+            appendLog("MQTT 错误: ${e.message}")
         }
     }
 
-    private fun handleRelayMessage(message: String) {
+    private fun subscribe(topic: String) {
         try {
-            val json = JSONObject(message)
+            mqttClient?.subscribe(topic, 1, null, object : IMqttActionListener {
+                override fun onSuccess(asyncActionToken: IMqttDeliveryToken?) {
+                    appendLog("已订阅: $topic")
+                }
+                override fun onFailure(asyncActionToken: IMqttDeliveryToken?, exception: Throwable?) {
+                    appendLog("订阅失败: ${exception?.message}")
+                }
+            })
+        } catch (e: Exception) {
+            appendLog("订阅错误: ${e.message}")
+        }
+    }
+
+    private fun publish(topic: String, payload: String) {
+        try {
+            val msg = MqttMessage(payload.toByteArray()).apply {
+                qos = 1
+                isRetained = false
+            }
+            mqttClient?.publish(topic, msg)
+        } catch (e: Exception) {
+            appendLog("发布失败: ${e.message}")
+        }
+    }
+
+    private fun handleMessage(payload: String) {
+        try {
+            val json = JSONObject(payload)
             when (json.optString("type")) {
-                "auth_ok" -> {
-                    appendLog("认证成功，正在注册...")
-                    wsClient?.send(JSONObject().apply {
-                        put("type", "register")
-                        put("role", "controlled")
-                        put("roomId", currentRoomId)
-                    }.toString())
-                }
-                "auth_error" -> appendLog("认证失败: ${json.optString("message")}")
-                "registered" -> {
-                    appendLog("已注册到房间: ${json.optString("roomId")}")
-                    runOnUiThread { tvRoom.text = "房间ID: ${json.optString("roomId")} (已注册)" }
-                }
-                "peer_connected" -> {
-                    appendLog("控制端已连接！")
-                    Toast.makeText(this, "控制端已连接！", Toast.LENGTH_LONG).show()
-                }
-                "peer_disconnected" -> {
-                    appendLog("控制端已断开")
-                    Toast.makeText(this, "控制端已断开", Toast.LENGTH_SHORT).show()
-                }
                 "command" -> handleCommand(json)
+                "status" -> {
+                    val status = json.optString("status")
+                    runOnUiThread {
+                        tvPeer.text = if (status == "online") "控制端: 在线 ✓" else "控制端: 离线"
+                    }
+                }
             }
         } catch (e: Exception) {
             appendLog("消息解析错误: ${e.message}")
@@ -217,7 +227,22 @@ class MainActivity : AppCompatActivity() {
         val action = json.optString("action")
         appendLog("收到命令: $action")
 
-        val result = when (action) {
+        val result = withAction(action, json)
+
+        val response = JSONObject().apply {
+            put("type", "command_result")
+            put("cmdId", cmdId)
+            put("action", action)
+            put("exitCode", result.exitCode)
+            put("stdout", result.stdout)
+            put("stderr", result.stderr)
+        }
+        publish("zyyh/${config.roomId}/result", response.toString())
+        appendLog("命令 $action 完成 (exit: ${result.exitCode})")
+    }
+
+    private suspend fun withAction(action: String, json: JSONObject): ShellResult {
+        return when (action) {
             "dump_ui" -> shell.dumpUi()
             "tap" -> {
                 val x = json.optInt("x", 0)
@@ -242,27 +267,20 @@ class MainActivity : AppCompatActivity() {
             "get_screen_size" -> shell.getScreenSize()
             else -> ShellResult(-1, "", "Unknown action: $action")
         }
-
-        val response = JSONObject().apply {
-            put("type", "command_result")
-            put("cmdId", cmdId)
-            put("action", action)
-            put("exitCode", result.exitCode)
-            put("stdout", result.stdout)
-            put("stderr", result.stderr)
-        }
-        wsClient?.send(response.toString())
-        appendLog("命令 $action 完成 (exit: ${result.exitCode})")
     }
 
     private fun disconnect() {
-        wsClient?.close()
-        wsClient = null
+        try {
+            mqttClient?.disconnect()
+            mqttClient?.close()
+        } catch (_: Exception) {}
+        mqttClient = null
+        isConnected = false
         btnConnect.isEnabled = true
         btnDisconnect.isEnabled = false
-        tvConn.text = "中继: 未连接"
-        tvConn.setTextColor(0xFF9E9E9E.toInt())
-        tvRoom.text = "房间ID: 无"
+        tvMqtt.text = "MQTT: 未连接"
+        tvRoom.text = "房间: 无"
+        tvPeer.text = "控制端: 离线"
     }
 
     private fun appendLog(msg: String) {
@@ -270,8 +288,7 @@ class MainActivity : AppCompatActivity() {
             val ts = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
                 .format(java.util.Date())
             tvLog.append("[$ts] $msg\n")
-            val sv = tvLog.parent as? android.widget.ScrollView
-            sv?.fullScroll(android.view.View.FOCUS_DOWN)
+            (tvLog.parent as? ScrollView)?.fullScroll(View.FOCUS_DOWN)
         }
     }
 

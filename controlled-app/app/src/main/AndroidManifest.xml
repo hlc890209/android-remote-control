@@ -3,7 +3,7 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Shizuku permissions -->
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
@@ -34,5 +34,8 @@
             android:exported="true"
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <!-- MQTT service -->
+        <service android:name="org.eclipse.paho.android.service.MqttService" />
     </application>
 </manifest>

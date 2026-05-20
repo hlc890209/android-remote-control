@@ -7,11 +7,9 @@ import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import kotlinx.coroutines.*
-import org.java_websocket.client.WebSocketClient
-import org.java_websocket.handshake.ServerHandshake
-import org.json.JSONArray
+import org.eclipse.paho.android.service.MqttAndroidClient
+import org.eclipse.paho.client.mqttv3.*
 import org.json.JSONObject
-import java.net.URI
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -19,7 +17,6 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var remoteView: RemoteView
     private lateinit var tvStatus: TextView
-    private lateinit var btnSettings: Button
     private lateinit var btnDump: Button
     private lateinit var btnBack: Button
     private lateinit var btnHome: Button
@@ -29,21 +26,21 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnTap: Button
     private lateinit var btnLongClick: Button
 
-    private var wsClient: WebSocketClient? = null
+    private var mqttClient: MqttAndroidClient? = null
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var pendingCmds = mutableMapOf<String, CompletableDeferred<JSONObject>>()
+    private val pendingCmds = mutableMapOf<String, CompletableDeferred<JSONObject>>()
+    private var peerOnline = false
+    private var currentRoomId = ""
 
     private var config = Config(
-        relayHost = "your-server.com",
-        relayPort = 8080,
-        authToken = "zyyh_remote_test_2024",
-        roomId = "room_001"
+        broker = "broker.emqx.io",
+        port = 1883,
+        roomId = "test_001"
     )
 
     private data class Config(
-        var relayHost: String,
-        var relayPort: Int,
-        var authToken: String,
+        var broker: String,
+        var port: Int,
         var roomId: String
     )
 
@@ -53,7 +50,6 @@ class MainActivity : AppCompatActivity() {
 
         remoteView = findViewById(R.id.remoteView)
         tvStatus = findViewById(R.id.tvStatus)
-        btnSettings = findViewById(R.id.btnSettings)
         btnDump = findViewById(R.id.btnDump)
         btnBack = findViewById(R.id.btnBack)
         btnHome = findViewById(R.id.btnHome)
@@ -63,23 +59,19 @@ class MainActivity : AppCompatActivity() {
         btnTap = findViewById(R.id.btnTap)
         btnLongClick = findViewById(R.id.btnLongClick)
 
-        btnSettings.setOnClickListener { showSettingsDialog() }
+        findViewById<Button>(R.id.btnSettings).setOnClickListener { showSettingsDialog() }
         btnDump.setOnClickListener { refreshUiDump() }
         btnBack.setOnClickListener { sendCommand("keyevent", mapOf("key" to "KEYCODE_BACK")) }
         btnHome.setOnClickListener { sendCommand("keyevent", mapOf("key" to "KEYCODE_HOME")) }
         btnTap.setOnClickListener { tapSelectedElement(false) }
         btnLongClick.setOnClickListener { tapSelectedElement(true) }
 
-        remoteView.onElementClicked = { node, _, _ ->
-            showElementInfo(node)
-        }
-
+        remoteView.onElementClicked = { node, _, _ -> showElementInfo(node) }
         remoteView.onUserTapAt = { x, y ->
             hideElementInfo()
             sendCommand("tap", mapOf("x" to x.roundToInt(), "y" to y.roundToInt()))
         }
 
-        // Auto-connect if last config exists
         showSettingsDialog()
     }
 
@@ -88,166 +80,157 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 32, 48, 32)
 
-            fun addLabel(text: String) = TextView(context).apply {
-                this.text = text
-                textSize = 14f
+            fun label(text: String) = TextView(context).apply {
+                this.text = text; textSize = 14f
                 setTextColor(0xFF666666.toInt())
                 setPadding(0, 12, 0, 4)
             }
 
-            fun addEdit(initial: String, hint: String, inputType: Int = InputType.TYPE_CLASS_TEXT) =
+            fun edit(initial: String, hint: String, type: Int = InputType.TYPE_CLASS_TEXT) =
                 EditText(context).apply {
-                    setText(initial)
-                    this.hint = hint
-                    this.inputType = inputType
+                    setText(initial); this.hint = hint; inputType = type
                     setPadding(8, 8, 8, 8)
                     setBackgroundResource(android.R.drawable.editbox_background)
                 }
 
-            addView(addLabel("中继服务器地址:"))
-            val etHost = addEdit(config.relayHost, "例如: 192.168.1.100 或 your-domain.com")
-            addView(etHost)
-
-            addView(addLabel("端口:"))
-            val etPort = addEdit(config.relayPort.toString(), "8080", InputType.TYPE_CLASS_NUMBER)
+            addView(label("MQTT Broker 地址:"))
+            val etBroker = edit(config.broker, "broker.emqx.io")
+            addView(etBroker)
+            addView(label("端口:"))
+            val etPort = edit(config.port.toString(), "1883", InputType.TYPE_CLASS_NUMBER)
             addView(etPort)
-
-            addView(addLabel("房间ID:"))
-            val etRoom = addEdit(config.roomId, "与控制端相同的房间ID")
+            addView(label("房间ID（与被控端一致）:"))
+            val etRoom = edit(config.roomId, "test_001")
             addView(etRoom)
-
-            addView(addLabel("Token:"))
-            val etToken = addEdit(config.authToken, "认证令牌")
-            addView(etToken)
         }
 
         AlertDialog.Builder(this)
-            .setTitle("连接设置")
+            .setTitle("MQTT 连接设置")
             .setView(inputLayout)
             .setPositiveButton("连接") { _, _ ->
-                val host = inputLayout.getChildAt(1).let { (it as EditText).text.toString() }
+                val broker = inputLayout.getChildAt(1).let { (it as EditText).text.toString() }
                 val port = inputLayout.getChildAt(3).let { (it as EditText).text.toString() }
                 val room = inputLayout.getChildAt(5).let { (it as EditText).text.toString() }
-                val token = inputLayout.getChildAt(7).let { (it as EditText).text.toString() }
-
-                config = Config(host, port.toIntOrNull() ?: 8080, token, room)
+                config = Config(broker, port.toIntOrNull() ?: 1883, room)
                 connect()
             }
             .setNegativeButton("取消") { _, _ ->
-                if (wsClient == null) {
-                    Toast.makeText(this, "请配置服务器连接", Toast.LENGTH_LONG).show()
-                }
+                if (mqttClient == null) Toast.makeText(this, "请配置MQTT连接", Toast.LENGTH_LONG).show()
             }
             .show()
     }
 
     private fun connect() {
         disconnect()
+        currentRoomId = config.roomId
+        val serverUri = "tcp://${config.broker}:${config.port}"
+        val clientId = "zyyh_controller_${config.roomId}_${UUID.randomUUID().toString().take(6)}"
 
-        scope.launch {
-            try {
-                val uri = URI("ws://${config.relayHost}:${config.relayPort}")
-                tvStatus.text = "状态: 正在连接..."
-                tvStatus.setBackgroundColor(0xFFFFF9C4.toInt())
+        tvStatus.text = "状态: 正在连接..."
+        tvStatus.setBackgroundColor(0xFFFFF9C4.toInt())
 
-                wsClient = object : WebSocketClient(uri) {
-                    override fun onOpen(handshake: ServerHandshake) {
-                        scope.launch {
-                            tvStatus.text = "状态: 已连接，正在认证..."
-                            tvStatus.setBackgroundColor(0xFFFFF9C4.toInt())
-                        }
-                        send(JSONObject().apply {
-                            put("type", "auth")
-                            put("token", config.authToken)
-                        }.toString())
-                    }
-
-                    override fun onMessage(message: String) {
-                        handleRelayMessage(message)
-                    }
-
-                    override fun onClose(code: Int, reason: String, remote: Boolean) {
-                        scope.launch {
-                            tvStatus.text = "状态: 已断开 ($reason)"
-                            tvStatus.setBackgroundColor(0xFFFFCDD2.toInt())
-                        }
-                    }
-
-                    override fun onError(ex: Exception) {
-                        scope.launch {
-                            tvStatus.text = "状态: 错误 - ${ex.message}"
-                            tvStatus.setBackgroundColor(0xFFFFCDD2.toInt())
-                        }
-                    }
-                }
-
-                wsClient?.connectBlocking()
-            } catch (e: Exception) {
-                tvStatus.text = "状态: 连接失败 - ${e.message}"
-                tvStatus.setBackgroundColor(0xFFFFCDD2.toInt())
-                Toast.makeText(this, "连接失败: ${e.message}", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    private fun disconnect() {
-        wsClient?.close()
-        wsClient = null
-        for (deferred in pendingCmds.values) {
-            deferred.completeExceptionally(Exception("Disconnected"))
-        }
-        pendingCmds.clear()
-    }
-
-    private fun handleRelayMessage(msg: String) {
         try {
-            val json = JSONObject(msg)
-            when (json.optString("type")) {
-                "auth_ok" -> {
-                    scope.launch {
-                        tvStatus.text = "状态: 认证成功，注册房间..."
-                        tvStatus.setBackgroundColor(0xFFFFF9C4.toInt())
-                    }
-                    wsClient?.send(JSONObject().apply {
-                        put("type", "register")
-                        put("role", "controller")
-                        put("roomId", config.roomId)
-                    }.toString())
-                }
-                "registered" -> {
-                    scope.launch {
-                        tvStatus.text = "状态: 已注册房间 ${config.roomId}，等待被控端..."
-                        tvStatus.setBackgroundColor(0xFFFFF9C4.toInt())
-                    }
-                }
-                "peer_connected" -> {
-                    scope.launch {
-                        tvStatus.text = "状态: 双方已连接 ✓"
-                        tvStatus.setBackgroundColor(0xFFC8E6C9.toInt())
-                        Toast.makeText(this@MainActivity, "被控端已连接！", Toast.LENGTH_LONG).show()
-                    }
-                }
-                "peer_disconnected" -> {
-                    scope.launch {
-                        tvStatus.text = "状态: 被控端已断开"
-                        tvStatus.setBackgroundColor(0xFFFFCDD2.toInt())
-                        Toast.makeText(this@MainActivity, "被控端已断开", Toast.LENGTH_SHORT).show()
-                    }
-                }
-                "command_result" -> {
-                    val cmdId = json.optString("cmdId", "")
-                    val deferred = pendingCmds.remove(cmdId)
-                    if (deferred != null) {
-                        deferred.complete(json)
-                    }
-                }
+            mqttClient = MqttAndroidClient(this, serverUri, clientId)
+            val options = MqttConnectOptions().apply {
+                isAutomaticReconnect = true
+                isCleanSession = true
+                connectionTimeout = 10
+                keepAliveInterval = 30
             }
+
+            mqttClient?.setCallback(object : MqttCallbackExtended {
+                override fun connectComplete(reconnect: Boolean, serverURI: String?) {
+                    scope.launch {
+                        tvStatus.text = "状态: 已连接，等待被控端..."
+                        tvStatus.setBackgroundColor(0xFFFFF9C4.toInt())
+                    }
+                    subscribe("zyyh/${config.roomId}/result")
+                    subscribe("zyyh/${config.roomId}/status")
+
+                    // 发布控制器在线
+                    publish("zyyh/${config.roomId}/status",
+                        """{"type":"status","status":"online"}""")
+                }
+
+                override fun connectionLost(cause: Throwable?) {
+                    peerOnline = false
+                    scope.launch {
+                        tvStatus.text = "状态: 连接断开"
+                        tvStatus.setBackgroundColor(0xFFFFCDD2.toInt())
+                    }
+                }
+
+                override fun messageArrived(topic: String?, message: MqttMessage?) {
+                    val payload = String(message?.payload ?: return)
+                    handleMessage(topic ?: "", payload)
+                }
+
+                override fun deliveryComplete(token: IMqttDeliveryToken?) {}
+            })
+
+            mqttClient?.connect(options, null, object : IMqttActionListener {
+                override fun onSuccess(asyncActionToken: IMqttDeliveryToken?) {}
+                override fun onFailure(asyncActionToken: IMqttDeliveryToken?, exception: Throwable?) {
+                    scope.launch {
+                        tvStatus.text = "状态: 连接失败 - ${exception?.message}"
+                        tvStatus.setBackgroundColor(0xFFFFCDD2.toInt())
+                    }
+                }
+            })
         } catch (e: Exception) {
-            e.printStackTrace()
+            tvStatus.text = "状态: 错误 - ${e.message}"
+            tvStatus.setBackgroundColor(0xFFFFCDD2.toInt())
+        }
+    }
+
+    private fun subscribe(topic: String) {
+        try { mqttClient?.subscribe(topic, 1) } catch (_: Exception) {}
+    }
+
+    private fun publish(topic: String, payload: String) {
+        try {
+            val msg = MqttMessage(payload.toByteArray()).apply { qos = 1 }
+            mqttClient?.publish(topic, msg)
+        } catch (_: Exception) {}
+    }
+
+    private fun handleMessage(topic: String, payload: String) {
+        try {
+            val json = JSONObject(payload)
+            when {
+                topic.endsWith("/result") -> handleResult(json)
+                topic.endsWith("/status") -> handleStatus(json)
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun handleResult(json: JSONObject) {
+        val cmdId = json.optString("cmdId", "")
+        val deferred = pendingCmds.remove(cmdId)
+        deferred?.let { if (!it.isCompleted) it.complete(json) }
+    }
+
+    private fun handleStatus(json: JSONObject) {
+        val status = json.optString("status")
+        peerOnline = status == "online"
+        scope.launch {
+            if (status == "online") {
+                tvStatus.text = "状态: 被控端在线 ✓"
+                tvStatus.setBackgroundColor(0xFFC8E6C9.toInt())
+                Toast.makeText(this@MainActivity, "被控端已连接！", Toast.LENGTH_SHORT).show()
+            } else {
+                tvStatus.text = "状态: 被控端离线"
+                tvStatus.setBackgroundColor(0xFFFFCDD2.toInt())
+            }
         }
     }
 
     private suspend fun sendCommandAwait(action: String, params: Map<String, Any> = mapOf()): JSONObject? {
+        if (!peerOnline) {
+            scope.launch { Toast.makeText(this@MainActivity, "被控端不在线", Toast.LENGTH_SHORT).show() }
+            return null
+        }
+
         val cmdId = UUID.randomUUID().toString().take(8)
         val deferred = CompletableDeferred<JSONObject>()
         pendingCmds[cmdId] = deferred
@@ -266,16 +249,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        wsClient?.send(cmd.toString())
-
+        publish("zyyh/${config.roomId}/command", cmd.toString())
         return withTimeoutOrNull(10000) { deferred.await() }
     }
 
     private fun sendCommand(action: String, params: Map<String, Any> = mapOf()) {
         scope.launch {
             val result = sendCommandAwait(action, params)
-            if (result == null) {
-                Toast.makeText(this@MainActivity, "命令超时或失败", Toast.LENGTH_SHORT).show()
+            if (result == null && peerOnline) {
+                Toast.makeText(this@MainActivity, "命令超时", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -295,149 +277,85 @@ class MainActivity : AppCompatActivity() {
                         tvStatus.text = "状态: UI已刷新 (${screenInfo.width}x${screenInfo.height})"
                     } else {
                         tvStatus.text = "状态: UI解析失败"
-                        Toast.makeText(this@MainActivity, "UI解析失败，XML格式异常", Toast.LENGTH_SHORT).show()
                     }
                 }
             } else {
-                val stderr = result?.optString("stderr", "")
                 tvStatus.text = "状态: UI获取失败"
-                Toast.makeText(this@MainActivity, "UI获取失败: $stderr", Toast.LENGTH_LONG).show()
             }
-
             progressBar.visibility = View.GONE
         }
     }
 
     private fun parseUiXml(xml: String): ScreenInfo? {
         try {
-            // Extract <hierarchy ... rotation="N"> ... </hierarchy>
-            val hierarchyStart = xml.indexOf("<hierarchy")
-            val hierarchyEnd = xml.indexOf("</hierarchy>")
-            if (hierarchyStart < 0 || hierarchyEnd < 0) return null
+            val hs = xml.indexOf("<hierarchy")
+            val he = xml.indexOf("</hierarchy>")
+            if (hs < 0 || he < 0) return null
+            val hxml = xml.substring(hs, he + "</hierarchy>".length)
 
-            val hierarchyStr = xml.substring(hierarchyStart, hierarchyEnd + "</hierarchy>".length)
-
-            // Get device size from bounds of root node
-            val rootBoundsMatch = Regex("""bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"""").find(hierarchyStr)
-            val (screenW, screenH) = if (rootBoundsMatch != null) {
-                val (_, left, top, right, bottom) = rootBoundsMatch.groupValues
-                right.toInt() to bottom.toInt()
+            val boundsMatch = Regex("""bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"""").find(hxml)
+            val (screenW, screenH) = if (boundsMatch != null) {
+                val g = boundsMatch.groupValues; g[3].toInt() to g[4].toInt()
             } else 1080 to 2340
 
-            val rootNode = parseXmlNode(hierarchyStr, 0)
-            if (rootNode == null || rootNode.bounds.isEmpty()) return null
+            val root = parseNode(hxml, 0) ?: return null
+            if (root.bounds.isEmpty()) return null
 
-            // Filter to only clickable/visible nodes for display
-            val allNodes = flattenNodes(rootNode).filter { node ->
-                node.enabled &&
-                node.bounds.width() > 10 &&
-                node.bounds.height() > 10 &&
-                (node.clickable || node.text.isNotEmpty() || node.contentDesc.isNotEmpty())
+            val allNodes = flatten(root).filter {
+                it.enabled && it.bounds.width() > 10 && it.bounds.height() > 10 &&
+                (it.clickable || it.text.isNotEmpty() || it.contentDesc.isNotEmpty())
             }
-
-            return ScreenInfo(width = screenW, height = screenH, nodes = allNodes)
+            return ScreenInfo(screenW, screenH, allNodes)
         } catch (e: Exception) {
             e.printStackTrace()
             return null
         }
     }
 
-    private fun parseXmlNode(xml: String, startIndex: Int): UiNode? {
-        val nodeStart = xml.indexOf("<node", startIndex)
-        if (nodeStart < 0) return null
-
-        val nodeEnd = findClosingTag(xml, nodeStart)
-        if (nodeEnd < 0) return null
-
-        val nodeContent = xml.substring(nodeStart, nodeEnd)
-
-        // Parse attributes
-        fun attr(name: String): String {
-            val regex = Regex("""$name="([^"]*)"""")
-            return regex.find(nodeContent)?.groupValues?.getOrElse(1) { "" } ?: ""
-        }
-
-        fun attrBool(name: String): Boolean = attr(name) == "true"
-
-        fun attrBounds(name: String): Rect {
-            val m = Regex("""\[(\d+),(\d+)\]\[(\d+),(\d+)\]""").find(attr(name))
-            return if (m != null) {
-                val (_, l, t, r, b) = m.groupValues
-                Rect(l.toInt(), t.toInt(), r.toInt(), b.toInt())
-            } else Rect(0, 0, 0, 0)
-        }
-
-        val bounds = attrBounds("bounds")
-        if (bounds.isEmpty()) return null
-
-        val node = UiNode(
-            bounds = bounds,
-            text = attr("text"),
-            contentDesc = attr("content-desc"),
-            resourceId = attr("resource-id"),
-            className = attr("class"),
-            clickable = attrBool("clickable"),
-            longClickable = attrBool("long-clickable"),
-            scrollable = attrBool("scrollable"),
-            checkable = attrBool("checkable"),
-            checked = attrBool("checked"),
-            enabled = attrBool("enabled"),
-            password = attrBool("password"),
-            depth = 0
-        )
-
-        // Parse children
-        var childStart = nodeContent.indexOf("<node", 1)
-        while (childStart > 0) {
-            val childEnd = findClosingTag(nodeContent, childStart)
-            if (childEnd < 0) break
-
-            val child = parseXmlNode(nodeContent, childStart)
-            if (child != null) {
-                child.depth = node.depth + 1
-                node.children.add(child)
+    private fun parseNode(xml: String, start: Int): UiNode? {
+        val ns = xml.indexOf("<node", start); if (ns < 0) return null
+        var depth = 0; var ne = ns
+        while (ne < xml.length) {
+            val c = xml[ne]
+            if (c == '<') {
+                if (ne + 1 < xml.length && xml[ne + 1] == '/') { depth--
+                    if (depth < 0) { ne = xml.indexOf(">", ne) + 1; break } }
+                else if (xml[ne + 1] != '!') {
+                    val cl = xml.indexOf(">", ne)
+                    if (cl > 0 && xml[cl - 1] == '/') { /* self-closing */ }
+                    else depth++
+                }
             }
+            ne++
+        }
+        if (ne >= xml.length) return null
 
-            childStart = nodeContent.indexOf("<node", childEnd)
+        val content = xml.substring(ns, ne)
+
+        fun attr(n: String): String = Regex("""$n="([^"]*)"""").find(content)?.groupValues?.getOrElse(1) { "" } ?: ""
+        fun abool(n: String): Boolean = attr(n) == "true"
+        fun abounds(): Rect {
+            val m = Regex("""\[(\d+),(\d+)\]\[(\d+),(\d+)\]""").find(attr("bounds"))
+            return if (m != null) Rect(m.groupValues[1].toInt(), m.groupValues[2].toInt(),
+                m.groupValues[3].toInt(), m.groupValues[4].toInt())
+            else Rect(0, 0, 0, 0)
         }
 
+        val bounds = abounds(); if (bounds.isEmpty()) return null
+        val node = UiNode(bounds, attr("text"), attr("content-desc"), attr("resource-id"),
+            attr("class"), abool("clickable"), abool("long-clickable"), abool("scrollable"),
+            abool("checkable"), abool("checked"), abool("enabled"), abool("password"), 0)
+
+        var cs = content.indexOf("<node", 1)
+        while (cs > 0) {
+            val child = parseNode(content, cs) ?: break
+            child.depth = node.depth + 1; node.children.add(child)
+            cs = content.indexOf("<node", cs + 1)
+        }
         return node
     }
 
-    private fun findClosingTag(xml: String, start: Int): Int {
-        var depth = 0
-        var i = start
-        while (i < xml.length) {
-            if (xml[i] == '<') {
-                if (i + 1 < xml.length && xml[i + 1] == '/') {
-                    depth--
-                    if (depth < 0) {
-                        val end = xml.indexOf(">", i)
-                        return if (end > 0) end + 1 else start + 1
-                    }
-                } else if (i + 1 < xml.length && xml[i + 1] != '!') {
-                    // Self-closing tag
-                    val closePos = xml.indexOf(">", i)
-                    if (closePos > 0 && xml[closePos - 1] == '/') {
-                        // self-closing, don't change depth
-                    } else {
-                        depth++
-                    }
-                }
-            }
-            i++
-        }
-        return start + 1
-    }
-
-    private fun flattenNodes(node: UiNode): List<UiNode> {
-        val result = mutableListOf<UiNode>()
-        result.add(node)
-        for (child in node.children) {
-            result.addAll(flattenNodes(child))
-        }
-        return result
-    }
+    private fun flatten(n: UiNode): List<UiNode> = listOf(n) + n.children.flatMap { flatten(it) }
 
     private fun showElementInfo(node: UiNode) {
         layoutElementInfo.visibility = View.VISIBLE
@@ -451,31 +369,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun hideElementInfo() {
-        layoutElementInfo.visibility = View.GONE
-    }
+    private fun hideElementInfo() { layoutElementInfo.visibility = View.GONE }
 
     private fun tapSelectedElement(longPress: Boolean) {
         val node = remoteView.getSelectedNode() ?: return
-        val cx = node.bounds.centerX()
-        val cy = node.bounds.centerY()
-
-        if (longPress) {
-            sendCommand("swipe", mapOf(
-                "x1" to cx, "y1" to cy,
-                "x2" to cx, "y2" to cy,
-                "duration" to 1000
-            ))
-        } else {
-            sendCommand("tap", mapOf("x" to cx, "y" to cy))
-        }
-
+        val cx = node.bounds.centerX(); val cy = node.bounds.centerY()
+        if (longPress) sendCommand("swipe", mapOf("x1" to cx, "y1" to cy, "x2" to cx, "y2" to cy, "duration" to 1000))
+        else sendCommand("tap", mapOf("x" to cx, "y" to cy))
         hideElementInfo()
     }
 
-    override fun onDestroy() {
-        disconnect()
-        scope.cancel()
-        super.onDestroy()
+    private fun disconnect() {
+        try { mqttClient?.disconnect(); mqttClient?.close() } catch (_: Exception) {}
+        mqttClient = null; peerOnline = false
+        for (d in pendingCmds.values) d.completeExceptionally(Exception("Disconnected"))
+        pendingCmds.clear()
     }
+
+    override fun onDestroy() { disconnect(); scope.cancel(); super.onDestroy() }
 }
