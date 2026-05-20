@@ -1,3 +1,5 @@
+[![Build APKs](https://github.com/hlc890209/android-remote-control/actions/workflows/build.yml/badge.svg)](https://github.com/hlc890209/android-remote-control/actions/workflows/build.yml)
+
 # 远程测试控制系统
 
 ## 系统架构
@@ -81,24 +83,65 @@ adb shell sh /storage/emulated/0/Android/data/moe.shizuku.privileged.api/files/s
 
 ### Step 2: 编译 Android 应用
 
-```bash
-# 使用 Android Studio 打开对应目录
-# 或命令行编译：
-cd controlled-app
-export ANDROID_HOME=/path/to/sdk
-./gradlew assembleDebug
-# APK 路径: app/build/outputs/apk/debug/app-debug.apk
+#### 方式一：从 GitHub Actions 下载 APK（推荐，无需本地环境）
 
-# 控制端同理
-cd ../controlling-app
-./gradlew assembleDebug
+> 推荐！每次推送到 GitHub 都会自动编译，APK 可直接下载安装。
+
+```
+1. 打开 https://github.com/hlc890209/android-remote-control/actions
+2. 点击最新一次的绿色勾 ✓ 的 workflow（或点击左侧 "Build APKs"）
+3. 在页面底部 "Artifacts" 部分
+4. 下载 ZYYH-Remote-APKs.zip
+5. 解压后得到两个 APK：
+   - controlled-app-debug.apk    → 安装到被控手机
+   - controlling-app-debug.apk   → 安装到控制手机
 ```
 
-编译后安装到对应手机：
+#### 方式二：本地 Android Studio 编译
+
+```
+1. 用 Android Studio 打开 controlled-app/ 目录
+2. 等待 Gradle 同步完成（首次会下载依赖，稍慢）
+3. Build → Build Bundle(s) / APK(s) → Build APK(s)
+4. 生成路径: app/build/outputs/apk/debug/app-debug.apk
+
+控制端同理打开 controlling-app/ 目录
+```
+
+#### 方式三：本地命令行编译（需安装 JDK 17 + Android SDK）
 
 ```bash
-adb install app-debug.apk     # 被控端
-# 控制端 APK 传输到手机手动安装
+# 1. 安装 JDK 17
+#    https://adoptium.net/temurin/releases/?version=17
+
+# 2. 安装 Android SDK Command Line Tools
+#    https://developer.android.com/studio#command-line-tools-only
+#    解压到 C:\Android\cmdline-tools
+#    运行 sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+# 3. 设置环境变量
+#    Windows:  set ANDROID_HOME=C:\Android
+#    Linux:    export ANDROID_HOME=/opt/android-sdk
+
+# 4. 编译被控端
+cd controlled-app
+gradle wrapper --gradle-version 8.5
+.\gradlew assembleDebug
+# APK: app\build\outputs\apk\debug\app-debug.apk
+
+# 5. 编译控制端
+cd ../controlling-app
+gradle wrapper --gradle-version 8.5
+.\gradlew assembleDebug
+```
+
+#### 安装到手机
+
+```bash
+# 被控端（通过 USB 连接电脑）
+adb install controlled-app/app/build/outputs/apk/debug/app-debug.apk
+
+# 控制端 APK 传输到手机手动安装（通过微信/QQ 发送文件后安装）
 ```
 
 ---

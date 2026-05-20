@@ -1,0 +1,57 @@
+name: Build APKs
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: temurin
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK platform 34
+        run: |
+          yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" 2>/dev/null || true
+        shell: bash
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.5
+
+      - name: Build 被控端 (controlled-app)
+        working-directory: controlled-app
+        run: |
+          gradle wrapper --gradle-version 8.5
+          export ANDROID_HOME=$ANDROID_SDK_ROOT
+          ./gradlew assembleDebug
+        shell: bash
+
+      - name: Build 控制端 (controlling-app)
+        working-directory: controlling-app
+        run: |
+          gradle wrapper --gradle-version 8.5
+          export ANDROID_HOME=$ANDROID_SDK_ROOT
+          ./gradlew assembleDebug
+        shell: bash
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZYYH-Remote-APKs
+          path: |
+            controlled-app/app/build/outputs/apk/debug/*.apk
+            controlling-app/app/build/outputs/apk/debug/*.apk
+          retention-days: 30
