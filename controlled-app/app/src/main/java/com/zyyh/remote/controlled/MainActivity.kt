@@ -7,9 +7,7 @@ import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.eclipse.paho.android.service.MqttAndroidClient
 import org.eclipse.paho.client.mqttv3.*
 import org.json.JSONObject
@@ -24,7 +22,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnConnect: Button
     private lateinit var btnDisconnect: Button
 
-    private val shell = ShizukuShell()
+    private lateinit var shell: ShizukuShell
     private var mqttClient: MqttAndroidClient? = null
     private var currentRoomId = ""
     private var isConnected = false
@@ -40,6 +38,8 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        shell = ShizukuShell(this)
 
         tvMqtt = findViewById(R.id.tvMqtt)
         tvRoom = findViewById(R.id.tvRoom)
@@ -73,8 +73,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(48, 32, 48, 32)
 
             fun label(text: String) = TextView(context).apply {
-                this.text = text
-                textSize = 14f
+                this.text = text; textSize = 14f
                 setTextColor(0xFF666666.toInt())
                 setPadding(0, 12, 0, 4)
             }
@@ -86,7 +85,7 @@ class MainActivity : AppCompatActivity() {
                     setBackgroundResource(android.R.drawable.editbox_background)
                 }
 
-            addView(label("MQTT Broker 地址（默认免费公共Broker）:"))
+            addView(label("MQTT Broker 地址:"))
             val etBroker = edit(config.broker, "broker.emqx.io")
             addView(etBroker)
             addView(label("端口:"))
@@ -126,10 +125,11 @@ class MainActivity : AppCompatActivity() {
                 isCleanSession = true
                 connectionTimeout = 10
                 keepAliveInterval = 30
-
-                // LWT: 通知控制端本机离线
-                will = MqttMessage("""{"type":"status","status":"offline"}""".toByteArray())
-                setWillDestination("zyyh/${config.roomId}/status")
+                setWill(
+                    "zyyh/${config.roomId}/status",
+                    """{"type":"status","status":"offline"}""".toByteArray(),
+                    1, false
+                )
             }
 
             mqttClient?.setCallback(object : MqttCallbackExtended {
@@ -142,12 +142,7 @@ class MainActivity : AppCompatActivity() {
                         btnDisconnect.isEnabled = true
                     }
                     appendLog(if (reconnect) "已重连" else "已连接")
-
-                    // 订阅控制命令
-                    val cmdTopic = "zyyh/${config.roomId}/command"
-                    subscribe(cmdTopic)
-
-                    // 发布在线状态
+                    subscribe("zyyh/${config.roomId}/command")
                     publish("zyyh/${config.roomId}/status",
                         """{"type":"status","status":"online"}""")
                 }
@@ -167,8 +162,8 @@ class MainActivity : AppCompatActivity() {
             })
 
             mqttClient?.connect(options, null, object : IMqttActionListener {
-                override fun onSuccess(asyncActionToken: IMqttDeliveryToken?) {}
-                override fun onFailure(asyncActionToken: IMqttDeliveryToken?, exception: Throwable?) {
+                override fun onSuccess(asyncActionToken: IMqttToken) {}
+                override fun onFailure(asyncActionToken: IMqttToken, exception: Throwable?) {
                     appendLog("连接失败: ${exception?.message}")
                     runOnUiThread { tvMqtt.text = "MQTT: 连接失败" }
                 }
@@ -181,10 +176,10 @@ class MainActivity : AppCompatActivity() {
     private fun subscribe(topic: String) {
         try {
             mqttClient?.subscribe(topic, 1, null, object : IMqttActionListener {
-                override fun onSuccess(asyncActionToken: IMqttDeliveryToken?) {
+                override fun onSuccess(asyncActionToken: IMqttToken) {
                     appendLog("已订阅: $topic")
                 }
-                override fun onFailure(asyncActionToken: IMqttDeliveryToken?, exception: Throwable?) {
+                override fun onFailure(asyncActionToken: IMqttToken, exception: Throwable?) {
                     appendLog("订阅失败: ${exception?.message}")
                 }
             })
@@ -195,10 +190,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun publish(topic: String, payload: String) {
         try {
-            val msg = MqttMessage(payload.toByteArray()).apply {
-                qos = 1
-                isRetained = false
-            }
+            val msg = MqttMessage(payload.toByteArray()).apply { qos = 1 }
             mqttClient?.publish(topic, msg)
         } catch (e: Exception) {
             appendLog("发布失败: ${e.message}")
@@ -244,16 +236,10 @@ class MainActivity : AppCompatActivity() {
     private suspend fun withAction(action: String, json: JSONObject): ShellResult {
         return when (action) {
             "dump_ui" -> shell.dumpUi()
-            "tap" -> {
-                val x = json.optInt("x", 0)
-                val y = json.optInt("y", 0)
-                shell.tap(x, y)
-            }
+            "tap" -> shell.tap(json.optInt("x", 0), json.optInt("y", 0))
             "swipe" -> {
-                val x1 = json.optInt("x1", 0)
-                val y1 = json.optInt("y1", 0)
-                val x2 = json.optInt("x2", 0)
-                val y2 = json.optInt("y2", 0)
+                val x1 = json.optInt("x1", 0); val y1 = json.optInt("y1", 0)
+                val x2 = json.optInt("x2", 0); val y2 = json.optInt("y2", 0)
                 val dur = json.optInt("duration", 300)
                 shell.swipe(x1, y1, x2, y2, dur)
             }
@@ -270,16 +256,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disconnect() {
-        try {
-            mqttClient?.disconnect()
-            mqttClient?.close()
-        } catch (_: Exception) {}
-        mqttClient = null
-        isConnected = false
-        btnConnect.isEnabled = true
-        btnDisconnect.isEnabled = false
-        tvMqtt.text = "MQTT: 未连接"
-        tvRoom.text = "房间: 无"
+        try { mqttClient?.disconnect(); mqttClient?.close() } catch (_: Exception) {}
+        mqttClient = null; isConnected = false
+        btnConnect.isEnabled = true; btnDisconnect.isEnabled = false
+        tvMqtt.text = "MQTT: 未连接"; tvRoom.text = "房间: 无"
         tvPeer.text = "控制端: 离线"
     }
 
@@ -292,8 +272,5 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onDestroy() {
-        disconnect()
-        super.onDestroy()
-    }
+    override fun onDestroy() { disconnect(); super.onDestroy() }
 }

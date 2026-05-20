@@ -37,5 +37,11 @@
 
         <!-- MQTT service -->
         <service android:name="org.eclipse.paho.android.service.MqttService" />
+
+        <!-- Shizuku UserService for shell commands -->
+        <service
+            android:name=".ShellService"
+            android:permission="rikka.shizuku.self.permission.IS_SELF"
+            android:process=":shizuku" />
     </application>
 </manifest>

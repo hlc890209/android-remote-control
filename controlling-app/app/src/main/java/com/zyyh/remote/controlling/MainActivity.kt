@@ -169,8 +169,8 @@ class MainActivity : AppCompatActivity() {
             })
 
             mqttClient?.connect(options, null, object : IMqttActionListener {
-                override fun onSuccess(asyncActionToken: IMqttDeliveryToken?) {}
-                override fun onFailure(asyncActionToken: IMqttDeliveryToken?, exception: Throwable?) {
+                override fun onSuccess(asyncActionToken: IMqttToken) {}
+                override fun onFailure(asyncActionToken: IMqttToken, exception: Throwable?) {
                     scope.launch {
                         tvStatus.text = "状态: 连接失败 - ${exception?.message}"
                         tvStatus.setBackgroundColor(0xFFFFCDD2.toInt())
