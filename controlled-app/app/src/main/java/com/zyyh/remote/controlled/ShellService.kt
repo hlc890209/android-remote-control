@@ -46,26 +46,6 @@ class ShellService : Service() {
         }
     }
 
-    private fun parseResult(raw: String): ShellResult {
-        val lines = raw.split("\n")
-        val exitLine = lines.find { it.startsWith("__EXIT:") }
-        val exitCode = exitLine?.removePrefix("__EXIT:")?.trim()?.toIntOrNull() ?: -1
-
-        val stdoutStart = lines.indexOfFirst { it == "__STDOUT:" }
-        val stderrStart = lines.indexOfFirst { it == "__STDERR:" }
-
-        val stdout = if (stdoutStart >= 0) {
-            val end = if (stderrStart > stdoutStart) stderrStart else lines.size
-            lines.subList(stdoutStart + 1, end).joinToString("\n").trim()
-        } else ""
-
-        val stderr = if (stderrStart >= 0) {
-            lines.subList(stderrStart + 1, lines.size).joinToString("\n").trim()
-        } else ""
-
-        return ShellResult(exitCode, stdout, stderr)
-    }
-
     companion object {
         private const val DESCRIPTOR = "com.zyyh.remote.controlled.ShellService"
     }

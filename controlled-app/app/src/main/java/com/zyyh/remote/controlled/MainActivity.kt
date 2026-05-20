@@ -268,7 +268,7 @@ class MainActivity : AppCompatActivity() {
             val ts = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
                 .format(java.util.Date())
             tvLog.append("[$ts] $msg\n")
-            (tvLog.parent as? ScrollView)?.fullScroll(View.FOCUS_DOWN)
+            findViewById<ScrollView>(R.id.scrollLog)?.fullScroll(View.FOCUS_DOWN)
         }
     }
 

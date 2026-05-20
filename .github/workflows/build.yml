@@ -18,12 +18,10 @@ jobs:
           java-version: 17
           distribution: temurin
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK platform 34
+      - name: Install Android SDK platform 34
         run: |
-          yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" 2>/dev/null || true
+          echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" | tail -5
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
         shell: bash
 
       - name: Setup Gradle
@@ -34,16 +32,14 @@ jobs:
       - name: Build 被控端 (controlled-app)
         working-directory: controlled-app
         run: |
-          gradle wrapper --gradle-version 8.5
-          export ANDROID_HOME=$ANDROID_SDK_ROOT
+          if [ ! -f gradlew ]; then gradle wrapper --gradle-version 8.5; fi
           ./gradlew assembleDebug
         shell: bash
 
       - name: Build 控制端 (controlling-app)
         working-directory: controlling-app
         run: |
-          gradle wrapper --gradle-version 8.5
-          export ANDROID_HOME=$ANDROID_SDK_ROOT
+          if [ ! -f gradlew ]; then gradle wrapper --gradle-version 8.5; fi
           ./gradlew assembleDebug
         shell: bash
 

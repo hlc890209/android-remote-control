@@ -1,5 +1,6 @@
 package com.zyyh.remote.controlling
 
+import android.graphics.Rect
 import android.os.Bundle
 import android.text.InputType
 import android.view.View
